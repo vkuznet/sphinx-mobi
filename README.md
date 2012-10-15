@@ -43,8 +43,8 @@ Build your mobi
 Once everything in place, run sphinx-quickstart in a usual way, and answer
 ``y`` to the following questions:
 
-#. Do you want to use the kindle/mobi builder (y/N) [n]: y
-#. pngmath: include math, rendered as PNG images (y/N) [n]: y
+* Do you want to use the kindle/mobi builder (y/N) [n]: y
+* pngmath: include math, rendered as PNG images (y/N) [n]: y
 
 The former enable mobi option in generated Makefile, while later allows you to
 embed LaTeX formulas into your mobi book.
