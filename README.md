@@ -31,8 +31,6 @@ Sphinx-1.1.3 code base with the following command:
 
 Then build and install your Sphinx in a usual way
 
-::
-
     python setup.py install --prefix=<your_install_path>
 
 Build your mobi
