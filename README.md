@@ -7,9 +7,9 @@ Requirements
 ------------
 I assume that you'll be able to download Sphinx-1.1.3 release as well as
 install on your system kindlegen. The former is provided
-`Here <http://pypi.python.org/pypi/Sphinx>`_, while later can be found on
+[here](http://pypi.python.org/pypi/Sphinx), while later can be found on
 Amazon Kindle support
-`page <http://www.amazon.com/gp/feature.html?ie=UTF8&docId=1000765211>`_.
+[page](http://www.amazon.com/gp/feature.html?ie=UTF8&docId=1000765211).
 
 Description
 -----------
@@ -23,8 +23,6 @@ Install
 
 To install, please get sphinx-1.1.3.mobi.patch and patch your vanila
 Sphinx-1.1.3 code base with the following command:
-
-::
 
     cd Sphinx-1.1.3
     patch -p1 < sphinx-1.1.3.mobi.patch
