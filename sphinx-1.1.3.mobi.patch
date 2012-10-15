@@ -1,0 +1,1410 @@
+diff -r -N -u Sphinx-1.1.3/Sphinx.egg-info/SOURCES.txt ../Sphinx-1.1.3/Sphinx.egg-info/SOURCES.txt
+--- Sphinx-1.1.3/Sphinx.egg-info/SOURCES.txt	2012-03-10 15:50:35.000000000 -0500
++++ ../Sphinx-1.1.3/Sphinx.egg-info/SOURCES.txt	2012-10-14 09:23:46.000000000 -0400
+@@ -121,6 +121,7 @@
+ sphinx/builders/latex.py
+ sphinx/builders/linkcheck.py
+ sphinx/builders/manpage.py
++sphinx/builders/mobi.py
+ sphinx/builders/qthelp.py
+ sphinx/builders/texinfo.py
+ sphinx/builders/text.py
+@@ -317,6 +318,16 @@
+ sphinx/themes/haiku/static/bg-page.png
+ sphinx/themes/haiku/static/bullet_orange.png
+ sphinx/themes/haiku/static/haiku.css_t
++sphinx/themes/mobi/genindex.html
++sphinx/themes/mobi/layout.html
++sphinx/themes/mobi/mobi-cover.html
++sphinx/themes/mobi/page.html
++sphinx/themes/mobi/search.html
++sphinx/themes/mobi/theme.conf
++sphinx/themes/mobi/static/file.png
++sphinx/themes/mobi/static/kindle-cover.jpg
++sphinx/themes/mobi/static/mobi.css
++sphinx/themes/mobi/static/pygments.css
+ sphinx/themes/nature/theme.conf
+ sphinx/themes/nature/static/nature.css_t
+ sphinx/themes/pyramid/layout.html
+diff -r -N -u Sphinx-1.1.3/doc/Makefile ../Sphinx-1.1.3/doc/Makefile
+--- Sphinx-1.1.3/doc/Makefile	2011-10-09 17:28:15.000000000 -0400
++++ ../Sphinx-1.1.3/doc/Makefile	2012-10-12 14:49:08.000000000 -0400
+@@ -12,8 +12,12 @@
+                    $(SPHINXOPTS) $(O) .
+ I18NSPHINXOPTS   = $(PAPEROPT_$(PAPER)) $(SPHINXOPTS) $(O) .
+ 
++# Kindle/mobi options
++MOBINAME = kindle.mobi
++MOBIOPTS = -D pygments_style=none
++
+ .PHONY: help clean html dirhtml singlehtml text man pickle json htmlhelp \
+-	qthelp devhelp epub latex latexpdf changes linkcheck doctest
++	qthelp devhelp epub mobi latex latexpdf changes linkcheck doctest
+ 
+ help:
+ 	@echo "Please use \`make <target>' where <target> is one of"
+@@ -28,6 +32,7 @@
+ 	@echo "  qthelp     to make Qt help files and project"
+ 	@echo "  devhelp    to make Devhelp files and project"
+ 	@echo "  epub       to make an epub file"
++	@echo "  mobi       to make an mobi file"
+ 	@echo "  latex      to make LaTeX files, you can set PAPER=a4 or PAPER=letter"
+ 	@echo "  latexpdf   to make LaTeX files and run pdflatex"
+ 	@echo "  texinfo    to make Texinfo files"
+@@ -103,6 +108,12 @@
+ 	@echo
+ 	@echo "Build finished. The epub file is in _build/epub."
+ 
++mobi:
++	$(SPHINXBUILD) -b mobi -t mobi $(MOBIOPTS) $(ALLSPHINXOPTS) _build/mobi
++	cd $(BUILDDIR)/mobi && kindlegen content.opf -o $(MOBINAME)
++	@echo
++	@echo "Build finished. The mobi file is in _build/mobi."
++
+ latex:
+ 	$(SPHINXBUILD) -b latex $(ALLSPHINXOPTS) _build/latex
+ 	@echo
+Binary files Sphinx-1.1.3/sphinx/__init__.pyc and ../Sphinx-1.1.3/sphinx/__init__.pyc differ
+diff -r -N -u Sphinx-1.1.3/sphinx/builders/__init__.py ../Sphinx-1.1.3/sphinx/builders/__init__.py
+--- Sphinx-1.1.3/sphinx/builders/__init__.py	2011-10-09 17:28:15.000000000 -0400
++++ ../Sphinx-1.1.3/sphinx/builders/__init__.py	2012-10-12 14:47:04.000000000 -0400
+@@ -326,6 +326,7 @@
+     'devhelp':    ('devhelp', 'DevhelpBuilder'),
+     'qthelp':     ('qthelp', 'QtHelpBuilder'),
+     'epub':       ('epub', 'EpubBuilder'),
++    'mobi':       ('mobi', 'MobiBuilder'),
+     'latex':      ('latex', 'LaTeXBuilder'),
+     'text':       ('text', 'TextBuilder'),
+     'man':        ('manpage', 'ManualPageBuilder'),
+diff -r -N -u Sphinx-1.1.3/sphinx/builders/mobi.py ../Sphinx-1.1.3/sphinx/builders/mobi.py
+--- Sphinx-1.1.3/sphinx/builders/mobi.py	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/builders/mobi.py	2012-10-12 20:42:58.000000000 -0400
+@@ -0,0 +1,564 @@
++# -*- coding: utf-8 -*-
++"""
++    sphinx.builders.mobi
++    ~~~~~~~~~~~~~~~~~~~~
++
++    Build mobi files.
++    Originally derived from qthelp.py.
++
++    :copyright: Copyright 2007-2011 by the Sphinx team, see AUTHORS.
++    :license: BSD, see LICENSE for details.
++"""
++
++import os
++import re
++import sys
++import time
++import codecs
++import zipfile
++from os import path
++
++from docutils import nodes
++
++from sphinx import addnodes
++from sphinx.builders.html import StandaloneHTMLBuilder
++from sphinx.util.osutil import EEXIST
++from sphinx.util.smartypants import sphinx_smarty_pants as ssp
++
++
++# (Fragment) templates from which the metainfo files content.opf, toc.ncx,
++# mimetype, and META-INF/container.xml are created.
++# This template section also defines strings that are embedded in the html
++# output but that may be customized by (re-)setting module attributes,
++# e.g. from conf.py.
++
++_mimetype_template = 'application/mobi+zip' # no EOL!
++
++_container_template = u'''\
++<?xml version="1.0" encoding="UTF-8"?>
++<container version="1.0"
++      xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
++  <rootfiles>
++    <rootfile full-path="content.opf"
++        media-type="application/oebps-package+xml"/>
++  </rootfiles>
++</container>
++'''
++
++_toc_template = u'''\
++<?xml version="1.0"?>
++<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
++  <head>
++    <meta name="dtb:uid" content="%(uid)s"/>
++    <meta name="dtb:depth" content="%(level)d"/>
++    <meta name="dtb:totalPageCount" content="0"/>
++    <meta name="dtb:maxPageNumber" content="0"/>
++  </head>
++  <docTitle>
++    <text>%(title)s</text>
++  </docTitle>
++  <navMap>
++%(navpoints)s
++  </navMap>
++</ncx>
++'''
++
++_navpoint_template = u'''\
++%(indent)s  <navPoint id="%(navpoint)s" playOrder="%(playorder)d">
++%(indent)s    <navLabel>
++%(indent)s      <text>%(text)s</text>
++%(indent)s    </navLabel>
++%(indent)s    <content src="%(refuri)s" />
++%(indent)s  </navPoint>'''
++
++_navpoint_indent = '  '
++_navPoint_template = 'navPoint%d'
++
++_content_template = u'''\
++<?xml version="1.0" encoding="UTF-8"?>
++<package xmlns="http://www.idpf.org/2007/opf" version="2.0"
++      unique-identifier="%(uid)s">
++  <metadata xmlns:opf="http://www.idpf.org/2007/opf"
++        xmlns:dc="http://purl.org/dc/elements/1.1/">
++    <dc:language>%(lang)s</dc:language>
++    <dc:title>%(title)s</dc:title>
++    <dc:creator opf:role="aut">%(author)s</dc:creator>
++    <dc:publisher>%(publisher)s</dc:publisher>
++    <dc:rights>%(copyright)s</dc:rights>
++    <dc:identifier id="%(uid)s" opf:scheme="%(scheme)s">%(id)s</dc:identifier>
++    <dc:date>%(date)s</dc:date>
++    <meta name="cover" content="my-cover-image"/>
++  </metadata>
++  <manifest>
++    <item id="my-cover-image" href="_static/kindle-cover.jpg" media-type="image/jpeg"/>
++    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml" />
++%(files)s
++  </manifest>
++  <spine toc="ncx">
++%(spine)s
++  </spine>
++</package>
++'''
++
++_cover_template = u'''\
++    <meta name="cover" content="%(cover)s"/>
++'''
++
++_coverpage_name = u'mobi-cover.html'
++
++_file_template = u'''\
++    <item id="%(id)s"
++          href="%(href)s"
++          media-type="%(media_type)s" />'''
++
++_spine_template = u'''\
++    <itemref idref="%(idref)s" />'''
++
++_toctree_template = u'toctree-l%d'
++
++_link_target_template = u' [%(uri)s]'
++
++_css_link_target_class = u'link-target'
++
++_media_types = {
++    '.html': 'application/xhtml+xml',
++    '.css': 'text/css',
++    '.png': 'image/png',
++    '.gif': 'image/gif',
++    '.svg': 'image/svg+xml',
++    '.jpg': 'image/jpeg',
++    '.jpeg': 'image/jpeg',
++    '.otf': 'application/x-font-otf',
++    '.ttf': 'application/x-font-ttf',
++}
++
++# Regular expression to match colons only in local fragment identifiers.
++# If the URI contains a colon before the #,
++# it is an external link that should not change.
++_refuri_re = re.compile("([^#:]*#)(.*)")
++
++
++# The mobi publisher
++
++class MobiBuilder(StandaloneHTMLBuilder):
++    """
++    Builder that outputs mobi files.
++
++    It creates the metainfo files container.opf, toc.ncx, mimetype, and
++    META-INF/container.xml.  Afterwards, all necessary files are zipped to an
++    mobi file.
++    """
++    name = 'mobi'
++    extension = '.mobi.epub'
++
++    # don't copy the reST source
++    copysource = False
++    supported_image_types = ['image/svg+xml', 'image/png', 'image/gif',
++                             'image/jpeg']
++    # turn off search
++    default_sidebars = []
++
++    # don't add links
++    add_permalinks = False
++    # don't add sidebar etc.
++    embedded = True
++
++    def init(self):
++        StandaloneHTMLBuilder.init(self)
++        # the output files for mobi must be .html only
++        self.out_suffix = '.html'
++        self.playorder = 0
++
++    def get_theme_config(self):
++        return self.config.mobi_theme, {}
++
++    # generic support functions
++    def make_id(self, name):
++        """Replace all characters not allowed for (X)HTML ids."""
++        return name.replace('/', '_').replace(' ', '')
++
++    def esc(self, name):
++        """Replace all characters not allowed in text an attribute values."""
++        # Like cgi.escape, but also replace apostrophe
++        name = name.replace('&', '&amp;')
++        name = name.replace('<', '&lt;')
++        name = name.replace('>', '&gt;')
++        name = name.replace('"', '&quot;')
++        name = name.replace('\'', '&#39;')
++        return name
++
++    def get_refnodes(self, doctree, result):
++        """Collect section titles, their depth in the toc and the refuri."""
++        # XXX: is there a better way than checking the attribute
++        # toctree-l[1-8] on the parent node?
++        if isinstance(doctree, nodes.reference) and doctree.has_key('refuri'):
++            refuri = doctree['refuri']
++            if refuri.startswith('http://') or refuri.startswith('https://') \
++                or refuri.startswith('irc:') or refuri.startswith('mailto:'):
++                return result
++            classes = doctree.parent.attributes['classes']
++            for level in range(8, 0, -1): # or range(1, 8)?
++                if (_toctree_template % level) in classes:
++                    result.append({
++                        'level': level,
++                        'refuri': self.esc(refuri),
++                        'text': ssp(self.esc(doctree.astext()))
++                    })
++                    break
++        else:
++            for elem in doctree.children:
++                result = self.get_refnodes(elem, result)
++        return result
++
++    def get_toc(self):
++        """Get the total table of contents, containg the master_doc
++        and pre and post files not managed by sphinx.
++        """
++        doctree = self.env.get_and_resolve_doctree(self.config.master_doc,
++            self, prune_toctrees=False)
++        self.refnodes = self.get_refnodes(doctree, [])
++        master_dir = os.path.dirname(self.config.master_doc)
++        if master_dir:
++            master_dir += '/' # XXX or os.sep?
++            for item in self.refnodes:
++                item['refuri'] = master_dir + item['refuri']
++        self.refnodes.insert(0, {
++            'level': 1,
++            'refuri': self.esc(self.config.master_doc + '.html'),
++            'text': ssp(self.esc(
++                    self.env.titles[self.config.master_doc].astext()))
++        })
++        for file, text in reversed(self.config.mobi_pre_files):
++            self.refnodes.insert(0, {
++                'level': 1,
++                'refuri': self.esc(file),
++                'text': ssp(self.esc(text))
++            })
++        for file, text in self.config.mobi_post_files:
++            self.refnodes.append({
++                'level': 1,
++                'refuri': self.esc(file),
++                'text': ssp(self.esc(text))
++            })
++
++    def fix_fragment(self, prefix, fragment):
++        """Return a href/id attribute with colons replaced by hyphens."""
++        return prefix + fragment.replace(':', '-')
++
++    def fix_ids(self, tree):
++        """Replace colons with hyphens in href and id attributes.
++
++        Some readers crash because they interpret the part as a
++        transport protocol specification.
++        """
++        for node in tree.traverse(nodes.reference):
++            if 'refuri' in node:
++                m = _refuri_re.match(node['refuri'])
++                if m:
++                    node['refuri'] = self.fix_fragment(m.group(1), m.group(2))
++            if 'refid' in node:
++                node['refid'] = self.fix_fragment('', node['refid'])
++        for node in tree.traverse(addnodes.desc_signature):
++            ids = node.attributes['ids']
++            newids = []
++            for id in ids:
++                newids.append(self.fix_fragment('', id))
++            node.attributes['ids'] = newids
++
++    def add_visible_links(self, tree):
++        """Append visible link targets after external links."""
++        for node in tree.traverse(nodes.reference):
++            uri = node.get('refuri', '')
++            if (uri.startswith('http:') or uri.startswith('https:') or
++                    uri.startswith('ftp:')) and uri not in node.astext():
++                uri = _link_target_template % {'uri': uri}
++                if uri:
++                    idx = node.parent.index(node) + 1
++                    link = nodes.inline(uri, uri)
++                    link['classes'].append(_css_link_target_class)
++                    node.parent.insert(idx, link)
++
++    def write_doc(self, docname, doctree):
++        """Write one document file.
++
++        This method is overwritten in order to fix fragment identifiers
++        and to add visible external links.
++        """
++        self.fix_ids(doctree)
++        self.add_visible_links(doctree)
++        return StandaloneHTMLBuilder.write_doc(self, docname, doctree)
++
++    def fix_genindex(self, tree):
++        """Fix href attributes for genindex pages."""
++        # XXX: modifies tree inline
++        # Logic modeled from themes/basic/genindex.html
++        for key, columns in tree:
++            for entryname, (links, subitems) in columns:
++                for (i, (ismain, link)) in enumerate(links):
++                    m = _refuri_re.match(link)
++                    if m:
++                        links[i] = (ismain,
++                                    self.fix_fragment(m.group(1), m.group(2)))
++                for subentryname, subentrylinks in subitems:
++                    for (i, (ismain, link)) in enumerate(subentrylinks):
++                        m = _refuri_re.match(link)
++                        if m:
++                            subentrylinks[i] = (ismain,
++                                self.fix_fragment(m.group(1), m.group(2)))
++
++    def handle_page(self, pagename, addctx, templatename='page.html',
++                    outfilename=None, event_arg=None):
++        """Create a rendered page.
++
++        This method is overwritten for genindex pages in order to fix href link
++        attributes.
++        """
++        if pagename.startswith('genindex'):
++            self.fix_genindex(addctx['genindexentries'])
++        StandaloneHTMLBuilder.handle_page(self, pagename, addctx, templatename,
++            outfilename, event_arg)
++
++
++    # Finish by building the mobi file
++    def handle_finish(self):
++        """Create the metainfo files and finally the mobi."""
++        self.get_toc()
++        self.build_mimetype(self.outdir, 'mimetype')
++        self.build_container(self.outdir, 'META-INF/container.xml')
++        self.build_content(self.outdir, 'content.opf')
++        self.build_toc(self.outdir, 'toc.ncx')
++        self.build_mobi(self.outdir, self.config.mobi_basename + self.extension)
++
++    def build_mimetype(self, outdir, outname):
++        """Write the metainfo file mimetype."""
++        self.info('writing %s file...' % outname)
++        f = codecs.open(path.join(outdir, outname), 'w', 'utf-8')
++        try:
++            f.write(_mimetype_template)
++        finally:
++            f.close()
++
++    def build_container(self, outdir, outname):
++        """Write the metainfo file META-INF/cointainer.xml."""
++        self.info('writing %s file...' % outname)
++        fn = path.join(outdir, outname)
++        try:
++            os.mkdir(path.dirname(fn))
++        except OSError, err:
++            if err.errno != EEXIST:
++                raise
++        f = codecs.open(path.join(outdir, outname), 'w', 'utf-8')
++        try:
++            f.write(_container_template)
++        finally:
++            f.close()
++
++    def content_metadata(self, files, spine):
++        """Create a dictionary with all metadata for the content.opf
++        file properly escaped.
++        """
++        metadata = {}
++        metadata['title'] = self.esc(self.config.mobi_title)
++        metadata['author'] = self.esc(self.config.mobi_author)
++        metadata['uid'] = self.esc(self.config.mobi_uid)
++        metadata['lang'] = self.esc(self.config.mobi_language)
++        metadata['publisher'] = self.esc(self.config.mobi_publisher)
++        metadata['copyright'] = self.esc(self.config.mobi_copyright)
++        metadata['scheme'] = self.esc(self.config.mobi_scheme)
++        metadata['id'] = self.esc(self.config.mobi_identifier)
++        metadata['date'] = self.esc(time.strftime('%Y-%m-%d'))
++        metadata['files'] = files
++        metadata['spine'] = spine
++        return metadata
++
++    def build_content(self, outdir, outname):
++        """Write the metainfo file content.opf It contains bibliographic data,
++        a file list and the spine (the reading order).
++        """
++        self.info('writing %s file...' % outname)
++
++        # files
++        if not outdir.endswith(os.sep):
++            outdir += os.sep
++        olen = len(outdir)
++        projectfiles = []
++        self.files = []
++        self.ignored_files = ['.buildinfo',
++            'mimetype', 'content.opf', 'toc.ncx', 'META-INF/container.xml',
++            self.config.mobi_basename + self.extension] + \
++            self.config.mobi_exclude_files
++        for root, dirs, files in os.walk(outdir):
++            for fn in files:
++                filename = path.join(root, fn)[olen:]
++                if filename in self.ignored_files:
++                    continue
++                ext = path.splitext(filename)[-1]
++                if ext not in _media_types:
++                    self.warn('unknown mimetype for %s, ignoring' % filename)
++                    continue
++                projectfiles.append(_file_template % {
++                    'href': self.esc(filename),
++                    'id': self.esc(self.make_id(filename)),
++                    'media_type': self.esc(_media_types[ext])
++                })
++                self.files.append(filename)
++
++        # spine
++        spine = []
++        for item in self.refnodes:
++            if '#' in item['refuri']:
++                continue
++            if item['refuri'] in self.ignored_files:
++                continue
++            spine.append(_spine_template % {
++                'idref': self.esc(self.make_id(item['refuri']))
++            })
++        for info in self.domain_indices:
++            spine.append(_spine_template % {
++                'idref': self.esc(self.make_id(info[0] + self.out_suffix))
++            })
++        if self.config.html_use_index:
++            spine.append(_spine_template % {
++                'idref': self.esc(self.make_id('genindex' + self.out_suffix))
++            })
++
++        # add the optional cover
++        content_tmpl = _content_template
++        if self.config.mobi_cover:
++            image, tmpl = self.config.mobi_cover
++            mpos = content_tmpl.rfind('</metadata>')
++            cpos = content_tmpl.rfind('\n', 0 , mpos) + 1
++            content_tmpl = content_tmpl[:cpos] + \
++                _cover_template % {'cover': self.esc(self.make_id(image))} + \
++                content_tmpl[cpos:]
++            if tmpl:
++                spine.insert(0, _spine_template % {
++                    'idref': self.esc(self.make_id(_coverpage_name))})
++                if _coverpage_name not in self.files:
++                    ext = path.splitext(_coverpage_name)[-1]
++                    self.files.append(_coverpage_name)
++                    projectfiles.append(_file_template % {
++                        'href': self.esc(_coverpage_name),
++                        'id': self.esc(self.make_id(_coverpage_name)),
++                        'media_type': self.esc(_media_types[ext])
++                    })
++                ctx = {'image': self.esc(image), 'title': self.config.project}
++                self.handle_page(
++                        os.path.splitext(_coverpage_name)[0], ctx, tmpl)
++
++        projectfiles = '\n'.join(projectfiles)
++        spine = '\n'.join(spine)
++
++        # write the project file
++        f = codecs.open(path.join(outdir, outname), 'w', 'utf-8')
++        try:
++            f.write(content_tmpl % \
++                self.content_metadata(projectfiles, spine))
++        finally:
++            f.close()
++
++    def new_navpoint(self, node, level, incr=True):
++        """Create a new entry in the toc from the node at given level."""
++        # XXX Modifies the node
++        if incr:
++            self.playorder += 1
++        node['indent'] = _navpoint_indent * level
++        node['navpoint'] = self.esc(_navPoint_template % self.playorder)
++        node['playorder'] = self.playorder
++        return _navpoint_template % node
++
++    def insert_subnav(self, node, subnav):
++        """Insert nested navpoints for given node.
++
++        The node and subnav are already rendered to text.
++        """
++        nlist = node.rsplit('\n', 1)
++        nlist.insert(-1, subnav)
++        return '\n'.join(nlist)
++
++    def build_navpoints(self, nodes):
++        """Create the toc navigation structure.
++
++        Subelements of a node are nested inside the navpoint.  For nested nodes
++        the parent node is reinserted in the subnav.
++        """
++        navstack = []
++        navlist = []
++        level = 1
++        lastnode = None
++        for node in nodes:
++            if not node['text']:
++                continue
++            file = node['refuri'].split('#')[0]
++            if file in self.ignored_files:
++                continue
++            if node['level'] > self.config.mobi_tocdepth:
++                continue
++            if node['level'] == level:
++                navlist.append(self.new_navpoint(node, level))
++            elif node['level'] == level + 1:
++                navstack.append(navlist)
++                navlist = []
++                level += 1
++                if lastnode and self.config.mobi_tocdup:
++                    # Insert starting point in subtoc with same playOrder
++                    navlist.append(self.new_navpoint(lastnode, level, False))
++                navlist.append(self.new_navpoint(node, level))
++            else:
++                while node['level'] < level:
++                    subnav = '\n'.join(navlist)
++                    navlist = navstack.pop()
++                    navlist[-1] = self.insert_subnav(navlist[-1], subnav)
++                    level -= 1
++                navlist.append(self.new_navpoint(node, level))
++            lastnode = node
++        while level != 1:
++            subnav = '\n'.join(navlist)
++            navlist = navstack.pop()
++            navlist[-1] = self.insert_subnav(navlist[-1], subnav)
++            level -= 1
++        return '\n'.join(navlist)
++
++    def toc_metadata(self, level, navpoints):
++        """Create a dictionary with all metadata for the toc.ncx file
++        properly escaped.
++        """
++        metadata = {}
++        metadata['uid'] = self.config.mobi_uid
++        metadata['title'] = self.config.mobi_title
++        metadata['level'] = level
++        metadata['navpoints'] = navpoints
++        return metadata
++
++    def build_toc(self, outdir, outname):
++        """Write the metainfo file toc.ncx."""
++        self.info('writing %s file...' % outname)
++
++        navpoints = self.build_navpoints(self.refnodes)
++        level = max(item['level'] for item in self.refnodes)
++        level = min(level, self.config.mobi_tocdepth)
++        f = codecs.open(path.join(outdir, outname), 'w', 'utf-8')
++        try:
++            f.write(_toc_template % self.toc_metadata(level, navpoints))
++        finally:
++            f.close()
++
++    def build_mobi(self, outdir, outname):
++        """Write the mobi file.
++
++        It is a zip file with the mimetype file stored uncompressed as the first
++        entry.
++        """
++        self.info('writing %s file...' % outname)
++        projectfiles = ['META-INF/container.xml', 'content.opf', 'toc.ncx'] \
++            + self.files
++        mobi = zipfile.ZipFile(path.join(outdir, outname), 'w', \
++            zipfile.ZIP_DEFLATED)
++        mobi.write(path.join(outdir, 'mimetype'), 'mimetype', \
++            zipfile.ZIP_STORED)
++        for file in projectfiles:
++            fp = path.join(outdir, file)
++            if isinstance(fp, unicode):
++                fp = fp.encode(sys.getfilesystemencoding())
++            mobi.write(fp, file, zipfile.ZIP_DEFLATED)
++        mobi.close()
+diff -r -N -u Sphinx-1.1.3/sphinx/config.py ../Sphinx-1.1.3/sphinx/config.py
+--- Sphinx-1.1.3/sphinx/config.py	2012-03-10 15:38:40.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/config.py	2012-10-12 15:23:52.000000000 -0400
+@@ -138,6 +138,25 @@
+         epub_tocdepth = (3, 'env'),
+         epub_tocdup = (True, 'env'),
+ 
++        # mobi options
++        mobi_basename = (lambda self: make_filename(self.project), None),
++        mobi_theme = ('mobi', 'html'),
++#        mobi_theme = ('mobi'),
++        mobi_title = (lambda self: self.html_title, 'html'),
++        mobi_author = ('unknown', 'html'),
++        mobi_language = (lambda self: self.language or 'en', 'html'),
++        mobi_publisher = ('unknown', 'html'),
++        mobi_copyright = (lambda self: self.copyright, 'html'),
++        mobi_identifier = ('unknown', 'html'),
++        mobi_scheme = ('unknown', 'html'),
++        mobi_uid = ('unknown', 'env'),
++        mobi_cover = ((), 'env'),
++        mobi_pre_files = ([], 'env'),
++        mobi_post_files = ([], 'env'),
++        mobi_exclude_files = ([], 'env'),
++        mobi_tocdepth = (3, 'env'),
++        mobi_tocdup = (True, 'env'),
++
+         # LaTeX options
+         latex_documents = ([], None),
+         latex_logo = (None, None),
+diff -r -N -u Sphinx-1.1.3/sphinx/quickstart.py ../Sphinx-1.1.3/sphinx/quickstart.py
+--- Sphinx-1.1.3/sphinx/quickstart.py	2012-03-10 15:38:40.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/quickstart.py	2012-10-12 19:40:30.000000000 -0400
+@@ -358,6 +358,24 @@
+ 
+ '''
+ 
++MASTER_MOBI_FILE = '''\
++.. %(project)s documentation master file, created by
++   sphinx-quickstart on %(now)s.
++   You can adapt this file completely to your liking, but it should at least
++   contain the root `toctree` directive.
++
++Welcome to %(project)s's documentation!
++===========%(project_underline)s=================
++
++Contents:
++
++.. toctree::
++    :maxdepth: %(mastertocmaxdepth)s
++
++%(mastertoctree)s
++
++'''
++
+ MAKEFILE = '''\
+ # Makefile for Sphinx documentation
+ #
+@@ -376,8 +394,12 @@
+ # the i18n builder cannot share the environment and doctrees with the others
+ I18NSPHINXOPTS  = $(PAPEROPT_$(PAPER)) $(SPHINXOPTS) %(rsrcdir)s
+ 
++# Kindle/mobi options
++MOBIOPTS = -D pygments_style=none
++MOBINAME = kindle.mobi
++
+ .PHONY: help clean html dirhtml singlehtml pickle json htmlhelp qthelp devhelp \
+-epub latex latexpdf text man changes linkcheck doctest gettext
++epub mobi latex latexpdf text man changes linkcheck doctest gettext
+ 
+ help:
+ \t@echo "Please use \\`make <target>' where <target> is one of"
+@@ -390,6 +412,7 @@
+ \t@echo "  qthelp     to make HTML files and a qthelp project"
+ \t@echo "  devhelp    to make HTML files and a Devhelp project"
+ \t@echo "  epub       to make an epub"
++\t@echo "  mobi       to make an mobi"
+ \t@echo "  latex      to make LaTeX files, you can set PAPER=a4 or PAPER=letter"
+ \t@echo "  latexpdf   to make LaTeX files and run them through pdflatex"
+ \t@echo "  text       to make text files"
+@@ -460,6 +483,12 @@
+ \t@echo
+ \t@echo "Build finished. The epub file is in $(BUILDDIR)/epub."
+ 
++mobi:
++\t$(SPHINXBUILD) -b mobi -t mobi $(MOBIOPTS) $(ALLSPHINXOPTS) $(BUILDDIR)/mobi
++\tcd $(BUILDDIR)/mobi && kindlegen content.opf -o $(MOBINAME)
++\t@echo
++\t@echo "Build finished. The mobi file is in $(BUILDDIR)/mobi."
++
+ latex:
+ \t$(SPHINXBUILD) -b latex $(ALLSPHINXOPTS) $(BUILDDIR)/latex
+ \t@echo
+@@ -811,6 +840,7 @@
+     * suffix:    source file suffix
+     * master:    master document name
+     * epub:      use epub (bool)
++    * mobi:      use mobi (bool)
+     * ext_*:     extensions to use (bools)
+     * makefile:  make Makefile
+     * batchfile: make command file
+@@ -905,6 +935,12 @@
+         do_prompt(d, 'epub', 'Do you want to use the epub builder (y/N)',
+                   'n', boolean)
+ 
++    if 'mobi' not in d:
++        print '''
++Sphinx can also add configuration for mobi output:'''
++        do_prompt(d, 'mobi', 'Do you want to use the kindle/mobi builder (y/N)',
++                  'n', boolean)
++
+     if 'ext_autodoc' not in d:
+         print '''
+ Please indicate if you want to use one of the following Sphinx extensions:'''
+@@ -1019,7 +1055,10 @@
+     write_file(path.join(srcdir, 'conf.py'), 'w', conf_text)
+ 
+     masterfile = path.join(srcdir, d['master'] + d['suffix'])
+-    write_file(masterfile, 'w', MASTER_FILE % d)
++    if d['mobi']:
++        write_file(masterfile, 'w', MASTER_MOBI_FILE % d)
++    else:
++        write_file(masterfile, 'w', MASTER_FILE % d)
+ 
+     if d['makefile']:
+         d['rsrcdir'] = d['sep'] and 'source' or '.'
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/genindex.html ../Sphinx-1.1.3/sphinx/themes/mobi/genindex.html
+--- Sphinx-1.1.3/sphinx/themes/mobi/genindex.html	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/genindex.html	2012-10-12 17:59:42.000000000 -0400
+@@ -0,0 +1,65 @@
++{#
++    basic/genindex.html
++    ~~~~~~~~~~~~~~~~~~~
++
++    Template for an "all-in-one" index.
++
++    :copyright: Copyright 2007-2011 by the Sphinx team, see AUTHORS.
++    :license: BSD, see LICENSE for details.
++#}
++{% macro indexentries(firstname, links) %}
++  <dt>
++  {%- if links -%}
++    <a href="{{ links[0][1] }}">
++    {%- if links[0][0] %}<strong>{% endif -%}
++    {{ firstname|e }}
++    {%- if links[0][0] %}</strong>{% endif -%}
++    </a>
++
++    {%- for ismain, link in links[1:] -%}
++      , <a href="{{ link }}">{% if ismain %}<strong>{% endif -%}
++      [{{ loop.index }}]
++      {%- if ismain %}</strong>{% endif -%}
++      </a>
++    {%- endfor %}
++  {%- else %}
++    {{ firstname|e }}
++  {%- endif %}
++  </dt>
++{% endmacro %}
++
++{% extends "layout.html" %}
++{% set title = _('Index') %}
++{% block body %}
++
++<h1 id="index">{{ _('Index') }}</h1>
++
++<div class="genindex-jumpbox">
++ {% for key, dummy in genindexentries -%}
++ <a href="#{{ key }}"><strong>{{ key }}</strong></a>
++ {% if not loop.last %}| {% endif %}
++ {%- endfor %}
++</div>
++
++{%- for key, entries in genindexentries %}
++<h2 id="{{ key }}">{{ key }}</h2>
++<table style="width: 100%" class="indextable genindextable"><tr>
++  {%- for column in entries|slice(2) if column %}
++  <td style="width: 33%" valign="top"><dl>
++    {%- for entryname, (links, subitems) in column %}
++      {{ indexentries(entryname, links) }}
++      {%- if subitems %}
++      <dd><dl>
++      {%- for subentryname, subentrylinks in subitems %}
++        {{ indexentries(subentryname, subentrylinks) }}
++      {%- endfor %}
++      </dl></dd>
++      {%- endif -%}
++    {%- endfor %}
++  </dl></td>
++  {%- endfor %}
++</tr></table>
++{% endfor %}
++
++{% endblock %}
++
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/layout.html ../Sphinx-1.1.3/sphinx/themes/mobi/layout.html
+--- Sphinx-1.1.3/sphinx/themes/mobi/layout.html	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/layout.html	2012-10-12 14:51:35.000000000 -0400
+@@ -0,0 +1,33 @@
++<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
++        "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
++
++<html xmlns="http://www.w3.org/1999/xhtml">
++
++<head>
++    <meta http-equiv="Content-Type" content="text/html; charset={{ encoding }}"/>
++    {{ metatags }}
++
++    {%- block htmltitle %}
++    <title>{{ title|striptags|e }}{{ titlesuffix }}</title>
++    {%- endblock %}
++
++    <link rel="stylesheet" href="{{ pathto('_static/' + style, 1) }}" type="text/css"/>
++    <link rel="stylesheet" href="{{ pathto('_static/pygments.css', 1) }}" type="text/css"/>
++    {%- for cssfile in css_files %}
++    <link rel="stylesheet" href="{{ pathto(cssfile, 1) }}" type="text/css"/>
++    {%- endfor %}
++</head>
++
++<body>
++{%- block content %}
++<div class="document">
++    {%- block document %}
++            <div class="body">
++                {% block body %} {% endblock %}
++            </div>
++    {%- endblock %}
++</div>
++{%- endblock %}
++
++</body>
++</html>
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/mobi-cover.html ../Sphinx-1.1.3/sphinx/themes/mobi/mobi-cover.html
+--- Sphinx-1.1.3/sphinx/themes/mobi/mobi-cover.html	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/mobi-cover.html	2012-10-12 14:52:16.000000000 -0400
+@@ -0,0 +1,24 @@
++{#
++    mobi/mobi-cover.html
++    ~~~~~~~~~~~~~~~~~~~~
++
++    Sample template for the html cover page.
++
++    :copyright: Copyright 2007-2011 by the Sphinx team, see AUTHORS.
++    :license: BSD, see LICENSE for details.
++#}
++{% extends "layout.html" %}
++{%- block rootrellink %}{% endblock %}
++{%- block relbaritems %}{% endblock %}
++{%- block sidebarlogo %}{% endblock %}
++{%- block linktags %}{% endblock %}
++{%- block relbar1 %}{% endblock %}
++{%- block sidebar1 %}{% endblock %}
++{%- block sidebar2 %}{% endblock %}
++{%- block footer %}{% endblock %}
++
++{% block content %}
++  <div class="mobi-cover">
++    <img src="{{ image }}" alt="Cover image" />
++  </div>
++{% endblock %}
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/page.html ../Sphinx-1.1.3/sphinx/themes/mobi/page.html
+--- Sphinx-1.1.3/sphinx/themes/mobi/page.html	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/page.html	2012-10-12 17:45:51.000000000 -0400
+@@ -0,0 +1,13 @@
++{#
++    basic/page.html
++    ~~~~~~~~~~~~~~~
++
++    Master template for simple pages.
++
++    :copyright: Copyright 2007-2011 by the Sphinx team, see AUTHORS.
++    :license: BSD, see LICENSE for details.
++#}
++{% extends "layout.html" %}
++{% block body %}
++  {{ body }}
++{% endblock %}
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/search.html ../Sphinx-1.1.3/sphinx/themes/mobi/search.html
+--- Sphinx-1.1.3/sphinx/themes/mobi/search.html	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/search.html	2012-10-12 17:48:40.000000000 -0400
+@@ -0,0 +1,10 @@
++{#
++    basic/search.html
++    ~~~~~~~~~~~~~~~~~
++
++    Template for the search page.
++
++    :copyright: Copyright 2007-2011 by the Sphinx team, see AUTHORS.
++    :license: BSD, see LICENSE for details.
++#}
++{% extends "layout.html" %}
+Binary files Sphinx-1.1.3/sphinx/themes/mobi/static/file.png and ../Sphinx-1.1.3/sphinx/themes/mobi/static/file.png differ
+Binary files Sphinx-1.1.3/sphinx/themes/mobi/static/kindle-cover.jpg and ../Sphinx-1.1.3/sphinx/themes/mobi/static/kindle-cover.jpg differ
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/static/mobi.css ../Sphinx-1.1.3/sphinx/themes/mobi/static/mobi.css
+--- Sphinx-1.1.3/sphinx/themes/mobi/static/mobi.css	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/static/mobi.css	2012-10-13 12:03:21.000000000 -0400
+@@ -0,0 +1,441 @@
++/*
++ * mobi.css_t
++ * ~~~~~~~~~~
++ *
++ * Sphinx stylesheet -- mobi theme.
++ *
++ * :copyright: Copyright 2007-2011 by the Sphinx team, see AUTHORS.
++ * :license: BSD, see LICENSE for details.
++ *
++ */
++
++/* -- main layout ----------------------------------------------------------- */
++
++div.clearer {
++    clear: both;
++}
++
++a:link, a:visited {
++    color: #3333ff;
++    text-decoration: underline;
++}
++
++img {
++    border: 0;
++}
++
++/* -- relbar ---------------------------------------------------------------- */
++
++div.related {
++    width: 100%;
++    font-family: sans-serif;
++    font-size: 90%;
++}
++
++div.related h3 {
++    display: none;
++}
++
++div.related ul {
++    margin: 0;
++    padding: 0 0 0 10px;
++    list-style: none;
++}
++
++div.related li {
++    display: inline;
++}
++
++div.related li.right {
++    float: right;
++    margin-right: 5px;
++}
++
++/* -- sidebar --------------------------------------------------------------- */
++
++div.sphinxsidebarwrapper {
++    padding: 10px 5px 0 10px;
++}
++
++div.sphinxsidebar {
++    float: left;
++    width: 230px;
++    margin-left: -100%;
++    font-size: 90%;
++}
++
++div.sphinxsidebar ul {
++    list-style: none;
++}
++
++div.sphinxsidebar ul ul,
++div.sphinxsidebar ul.want-points {
++    margin-left: 20px;
++    list-style: square;
++}
++
++div.sphinxsidebar ul ul {
++    margin-top: 0;
++    margin-bottom: 0;
++}
++
++div.sphinxsidebar form {
++    margin-top: 10px;
++}
++
++div.sphinxsidebar input {
++    border: 1px solid #98dbcc;
++    font-family: sans-serif;
++    font-size: 100%;
++}
++
++img {
++    border: 0;
++}
++
++/* -- search page ----------------------------------------------------------- */
++
++ul.search {
++    margin: 10px 0 0 20px;
++    padding: 0;
++}
++
++ul.search li {
++    padding: 5px 0 5px 20px;
++    background-image: url(file.png);
++    background-repeat: no-repeat;
++    background-position: 0 7px;
++}
++
++ul.search li a {
++    font-weight: bold;
++}
++
++ul.search li div.context {
++    color: #888;
++    margin: 2px 0 0 30px;
++    text-align: left;
++}
++
++ul.keywordmatches li.goodmatch a {
++    font-weight: bold;
++}
++
++/* -- index page ------------------------------------------------------------ */
++
++table.contentstable {
++    width: 90%;
++}
++
++table.contentstable p.biglink {
++    line-height: 150%;
++}
++
++a.biglink {
++    font-size: 130%;
++}
++
++span.linkdescr {
++    font-style: italic;
++    padding-top: 5px;
++    font-size: 90%;
++}
++
++/* -- general index --------------------------------------------------------- */
++
++table.indextable td {
++    text-align: left;
++    vertical-align: top;
++}
++
++table.indextable dl, table.indextable dd {
++    margin-top: 0;
++    margin-bottom: 0;
++}
++
++table.indextable tr.pcap {
++    height: 10px;
++}
++
++table.indextable tr.cap {
++    margin-top: 10px;
++    background-color: #f2f2f2;
++}
++
++img.toggler {
++    margin-right: 3px;
++    margin-top: 3px;
++    cursor: pointer;
++}
++
++/* -- general body styles --------------------------------------------------- */
++
++a.headerlink {
++    visibility: hidden;
++}
++
++div.body p.caption {
++    text-align: inherit;
++}
++
++div.body td {
++    text-align: left;
++}
++
++.field-list ul {
++    padding-left: 100%;
++}
++
++.first {
++    margin-top: 0 !important;
++}
++
++p.rubric {
++    margin-top: 30px;
++    font-weight: bold;
++}
++
++/* -- sidebars -------------------------------------------------------------- */
++
++div.sidebar {
++    margin: 0 0 0.5em 1em;
++    border: 1px solid #ddb;
++    padding: 7px 7px 0 7px;
++    background-color: #ffe;
++    width: 40%;
++    float: right;
++}
++
++p.sidebar-title {
++    font-weight: bold;
++}
++
++/* -- topics ---------------------------------------------------------------- */
++
++div.topic {
++    border: 1px solid #ccc;
++    padding: 7px 7px 0 7px;
++    margin: 10px 0 10px 0;
++}
++
++p.topic-title {
++    font-size: 110%;
++    font-weight: bold;
++    margin-top: 10px;
++}
++
++/* -- admonitions ----------------------------------------------------------- */
++
++div.admonition {
++    margin-top: 10px;
++    margin-bottom: 10px;
++    padding: 7px;
++}
++
++div.admonition dt {
++    font-weight: bold;
++}
++
++div.admonition dl {
++    margin-bottom: 0;
++}
++
++p.admonition-title {
++    margin: 0px 10px 5px 0px;
++    font-weight: bold;
++}
++
++div.body p.centered {
++    text-align: center;
++    margin-top: 25px;
++}
++
++/* -- tables ---------------------------------------------------------------- */
++
++table.docutils {
++    border: 0;
++    border-collapse: collapse;
++}
++
++table.docutils td, table.docutils th {
++    padding: 1px 8px 1px 5px;
++    border-top: 0;
++    border-left: 0;
++    border-right: 0;
++    border-bottom: 1px solid #aaa;
++}
++
++table.field-list td, table.field-list th {
++    border: 0 !important;
++}
++
++table.footnote td, table.footnote th {
++    border: 0 !important;
++}
++
++th {
++    text-align: left;
++    padding-right: 5px;
++}
++
++/* -- other body styles ----------------------------------------------------- */
++
++dl {
++    margin-bottom: 15px;
++}
++
++dd p {
++    margin-top: 0px;
++}
++
++dd ul, dd table {
++    margin-bottom: 10px;
++}
++
++dd {
++    margin-top: 3px;
++    margin-bottom: 10px;
++    margin-left: 30px;
++}
++
++dt:target, .highlighted {
++    background-color: #ddd;
++}
++
++dl.glossary dt {
++    font-weight: bold;
++    font-size: 110%;
++}
++
++.field-list ul {
++    margin: 0;
++    padding-left: 1em;
++}
++
++.field-list p {
++    margin: 0;
++}
++
++.refcount {
++    color: #060;
++}
++
++.optional {
++    font-size: 130%;
++}
++
++.versionmodified {
++    font-style: italic;
++}
++
++.system-message {
++    background-color: #fda;
++    padding: 5px;
++    border: 3px solid red;
++}
++
++.footnote:target  {
++    background-color: #dddddd;
++}
++
++/* -- code displays --------------------------------------------------------- */
++
++pre {
++    font-family: "Courier", monospace;
++}
++
++td.linenos pre {
++    padding: 5px 0px;
++    border: 0;
++    background-color: transparent;
++    color: #aaa;
++}
++
++table.highlighttable {
++    margin-left: 0.5em;
++}
++
++table.highlighttable td {
++    padding: 0 0.5em 0 0.5em;
++}
++
++tt {
++    font-family: "Courier", monospace;
++}
++
++tt.descname {
++    background-color: transparent;
++    font-weight: bold;
++    font-size: 1.2em;
++}
++
++tt.descclassname {
++    background-color: transparent;
++}
++
++tt.xref, a tt {
++    background-color: transparent;
++    font-weight: bold;
++}
++
++h1 tt, h2 tt, h3 tt, h4 tt, h5 tt, h6 tt {
++    background-color: transparent;
++}
++h1 {
++    font-size: 1.5em;
++}
++h2 {
++    font-size: 1.25em;
++}
++h3 {
++    font-size: 1.0em;
++}
++
++/* -- math display ---------------------------------------------------------- */
++
++img.math {
++    vertical-align: middle;
++    text-align: left;
++}
++
++div.body div.math p {
++/*    text-align: center;*/
++    text-align: left;
++}
++
++span.eqno {
++    float: right;
++}
++
++/* -- special divs  --------------------------------------------------------- */
++
++div.quotebar {
++    background-color: #e3eff1;
++    float: right;
++    font-family: sans-serif;
++    padding: 7px 7px;
++    border: 1px solid #ccc;
++}
++div.footer {
++    background-color: #e3eff1;
++    padding: 3px 8px 3px 0;
++    clear: both;
++    font-family: sans-serif;
++    font-size: 80%;
++    text-align: right;
++}
++
++div.footer a {
++    text-decoration: underline;
++}
++
++/* -- link-target ----------------------------------------------------------- */
++
++.link-target {
++    font-size: 80%;
++}
++
++table .link-target {
++    /* Do not show links in tables, there is not enough space */
++    display: none;
++}
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/static/pygments.css ../Sphinx-1.1.3/sphinx/themes/mobi/static/pygments.css
+--- Sphinx-1.1.3/sphinx/themes/mobi/static/pygments.css	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/static/pygments.css	2012-10-13 12:01:50.000000000 -0400
+@@ -0,0 +1,9 @@
++.highlight .hll { background-color: #ffffcc }
++.highlight {
++    padding-left: 5px;
++    padding-right: 5px;
++    background-color: #E6E6E6;
++    border: 1px solid #333333;
++    font-size: 80%;
++    font-family: "Courier", monospace;
++}
+diff -r -N -u Sphinx-1.1.3/sphinx/themes/mobi/theme.conf ../Sphinx-1.1.3/sphinx/themes/mobi/theme.conf
+--- Sphinx-1.1.3/sphinx/themes/mobi/theme.conf	1969-12-31 19:00:00.000000000 -0500
++++ ../Sphinx-1.1.3/sphinx/themes/mobi/theme.conf	2012-10-13 11:57:09.000000000 -0400
+@@ -0,0 +1,10 @@
++[theme]
++inherit = none
++stylesheet = mobi.css
++pygments_style = none
++bodyfont = 'Palatino', serif
++headfont = Tahoma, Geneva, sans-serif;
++
++[options]
++nosidebar = true
++sidebarwidth = 0
