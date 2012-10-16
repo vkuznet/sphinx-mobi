@@ -56,3 +56,9 @@ Future
 
 Once time permit I'll look further in customization of mobi builder in sphinx
 code. Upon that time, I'm happy with this preliminary hack.
+
+References
+----------
+
+Most of this work was inspired and based on materials presented in this
+[blog](http://pedrokroger.net/2012/10/using-sphinx-to-write-books/).
